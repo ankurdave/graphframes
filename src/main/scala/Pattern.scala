@@ -19,7 +19,7 @@ sealed trait Pattern
 
 sealed trait Vertex extends Pattern
 
-// case class AnonymousVertex() extends Vertex
+case class AnonymousVertex() extends Vertex
 
 case class NamedVertex(name: String) extends Vertex
 
@@ -30,5 +30,3 @@ sealed trait Edge extends Pattern
 case class AnonymousEdge(src: Vertex, dst: Vertex) extends Edge
 
 case class NamedEdge(name: String, src: Vertex, dst: Vertex) extends Edge
-
-// example: triangle

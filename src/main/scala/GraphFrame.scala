@@ -34,7 +34,7 @@ import org.apache.spark.storage.StorageLevel
 object GraphFrame {
   def apply(v: DataFrame, e: DataFrame): GraphFrame = {
     require(v.columns.contains("id"))
-    require(e.columns.contains("srcId") && e.columns.contains("dstId"))
+    require(e.columns.contains("src_id") && e.columns.contains("dst_id"))
     new GraphFrame(v, e)
   }
 }
@@ -66,12 +66,24 @@ class GraphFrame protected (
 
   private def prefixWithName(name: String, col: String) = name + "_" + col
   private def vId(name: String) = prefixWithName(name, "id")
-  private def eSrcId(name: String) = prefixWithName(name, "srcId")
-  private def eDstId(name: String) = prefixWithName(name, "dstId")
+  private def eSrcId(name: String) = prefixWithName(name, "src_id")
+  private def eDstId(name: String) = prefixWithName(name, "dst_id")
   private def pfxE(name: String) = renameAll(edges, prefixWithName(name, _))
   private def pfxV(name: String) = renameAll(vertices, prefixWithName(name, _))
 
   private def findIncremental(prev: DataFrame, p: Pattern): DataFrame = p match {
+    case NamedEdge(name, AnonymousVertex(), AnonymousVertex()) =>
+      val eRen = pfxE(name)
+      prev.join(eRen)
+
+    case NamedEdge(name, VertexReference(srcName), AnonymousVertex()) =>
+      val eRen = pfxE(name)
+      prev.join(eRen, eRen(eSrcId(name)) === prev(vId(srcName)))
+
+    case NamedEdge(name, AnonymousVertex(), VertexReference(dstName)) =>
+      val eRen = pfxE(name)
+      prev.join(eRen, eRen(eDstId(name)) === prev(vId(dstName)))
+
     case NamedEdge(name, VertexReference(srcName), VertexReference(dstName)) =>
       val eRen = pfxE(name)
       prev.join(eRen,
@@ -98,7 +110,7 @@ class GraphFrame protected (
         .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName)))
 
     case AnonymousEdge(src, dst) =>
-      val tmpName = "_tmp"
+      val tmpName = "__tmp"
       val result = findIncremental(prev, NamedEdge(tmpName, src, dst))
       dropAll(result, e.columns.map(col => prefixWithName(tmpName, col)))
   }
