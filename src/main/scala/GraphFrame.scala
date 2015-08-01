@@ -52,6 +52,9 @@ class GraphFrame protected (
   /** Default constructor is provided to support serialization */
   protected def this() = this(null, null)
 
+  def find(pattern: String): DataFrame =
+    find(Pattern.parse(pattern))
+
   def find(patterns: Seq[Pattern]): DataFrame = {
     val unitDataFrame = sqlContext.createDataFrame(
       sqlContext.sparkContext.parallelize(List(Row.empty)),

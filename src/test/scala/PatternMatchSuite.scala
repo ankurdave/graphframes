@@ -43,10 +43,7 @@ class PatternMatchSuite extends FunSuite {
   val g = GraphFrame(v, e)
 
   test("triplets") {
-    val tripletPattern = Seq(
-      AnonymousEdge(NamedVertex("u"), NamedVertex("v")))
-
-    val triplets = g.find(tripletPattern)
+    val triplets = g.find("(u)-[]->(v)")
 
     assert(triplets.columns === Array("u_id", "u_attr", "v_id", "v_attr"))
     assert(triplets.collect.toSet === Set(
@@ -58,12 +55,7 @@ class PatternMatchSuite extends FunSuite {
   }
 
   test("triangles with vertex attributes") {
-    val trianglePattern = Seq(
-      AnonymousEdge(NamedVertex("a"), NamedVertex("b")),
-      AnonymousEdge(VertexReference("b"), NamedVertex("c")),
-      AnonymousEdge(VertexReference("c"), VertexReference("a")))
-
-    val triangles = g.find(trianglePattern)
+    val triangles = g.find("(a)-[]->(b); (b)-[]->(c); (c)-[]->(a)")
 
     assert(triangles.columns === Array("a_id", "a_attr", "b_id", "b_attr", "c_id", "c_attr"))
     assert(triangles.collect.toSet === Set(
@@ -74,12 +66,7 @@ class PatternMatchSuite extends FunSuite {
   }
 
   test("triangles without vertex attributes") {
-    val trianglePattern = Seq(
-      NamedEdge("e1", AnonymousVertex(), AnonymousVertex()),
-      NamedEdge("e2", VertexReference("e1_dst"), AnonymousVertex()),
-      AnonymousEdge(VertexReference("e2_dst"), VertexReference("e1_src")))
-
-    val triangles = g.find(trianglePattern)
+    val triangles = g.find("()-[e1]->(); (e1_dst)-[e2]->(); (e2_dst)-[]->(e1_src)")
     assert(triangles.columns === Array("e1_src_id", "e1_dst_id", "e2_src_id", "e2_dst_id"))
     assert(triangles.drop("e1_dst_id").collect.toSet === Set(
       Row(0L, 1L, 2L),
