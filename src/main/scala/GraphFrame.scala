@@ -56,13 +56,9 @@ class GraphFrame protected (
     find(Pattern.parse(pattern))
 
   def find(patterns: Seq[Pattern]): DataFrame = {
-    val unitDataFrame = sqlContext.createDataFrame(
-      sqlContext.sparkContext.parallelize(List(Row.empty)),
-      StructType(Nil))
-    patterns.foldLeft(unitDataFrame) {
-      case (acc, p) =>
-        findIncremental(acc, p)
-    }
+    patterns.foldLeft[Option[DataFrame]](None) {
+      case (acc, p) => Some(findIncremental(acc, p))
+    }.getOrElse(sqlContext.emptyDataFrame)
   }
 
   import v.sqlContext.implicits._
@@ -74,41 +70,53 @@ class GraphFrame protected (
   private def pfxE(name: String) = renameAll(edges, prefixWithName(name, _))
   private def pfxV(name: String) = renameAll(vertices, prefixWithName(name, _))
 
-  private def findIncremental(prev: DataFrame, p: Pattern): DataFrame = p match {
+  private def maybeJoin(aOpt: Option[DataFrame], b: DataFrame): DataFrame =
+    aOpt match {
+      case Some(a) => a.join(b)
+      case None => b
+    }
+  private def maybeJoin(
+      aOpt: Option[DataFrame], b: DataFrame, joinExprs: DataFrame => Column): DataFrame =
+    aOpt match {
+      case Some(a) => a.join(b, joinExprs(a))
+      case None => b
+    }
+
+  private def findIncremental(prev: Option[DataFrame], p: Pattern): DataFrame = p match {
     case NamedEdge(name, AnonymousVertex(), AnonymousVertex()) =>
       val eRen = pfxE(name)
-      prev.join(eRen)
+      maybeJoin(prev, eRen)
 
     case NamedEdge(name, VertexReference(srcName), AnonymousVertex()) =>
       val eRen = pfxE(name)
-      prev.join(eRen, eRen(eSrcId(name)) === prev(vId(srcName)))
+      maybeJoin(prev, eRen, prev => eRen(eSrcId(name)) === prev(vId(srcName)))
 
     case NamedEdge(name, AnonymousVertex(), VertexReference(dstName)) =>
       val eRen = pfxE(name)
-      prev.join(eRen, eRen(eDstId(name)) === prev(vId(dstName)))
+      maybeJoin(prev, eRen, prev => eRen(eDstId(name)) === prev(vId(dstName)))
 
     case NamedEdge(name, VertexReference(srcName), VertexReference(dstName)) =>
       val eRen = pfxE(name)
-      prev.join(eRen,
+      maybeJoin(prev, eRen, prev =>
         eRen(eSrcId(name)) === prev(vId(srcName)) && eRen(eDstId(name)) === prev(vId(dstName)))
 
     case NamedEdge(name, VertexReference(srcName), NamedVertex(dstName)) =>
       val eRen = pfxE(name)
       val dstV = pfxV(dstName)
-      prev.join(eRen, eRen(eSrcId(name)) === prev(vId(srcName)))
+      maybeJoin(prev, eRen, prev => eRen(eSrcId(name)) === prev(vId(srcName)))
         .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName)))
 
     case NamedEdge(name, NamedVertex(srcName), VertexReference(dstName)) =>
       val eRen = pfxE(name)
       val srcV = pfxV(srcName)
-      prev.join(eRen, eRen(eDstId(name)) === prev(vId(dstName)))
+      maybeJoin(prev, eRen, prev => eRen(eDstId(name)) === prev(vId(dstName)))
         .join(srcV, eRen(eSrcId(name)) === srcV(vId(srcName)))
 
     case NamedEdge(name, NamedVertex(srcName), NamedVertex(dstName)) =>
       val eRen = pfxE(name)
       val srcV = pfxV(srcName)
       val dstV = pfxV(dstName)
-      prev.join(eRen)
+      maybeJoin(prev, eRen)
         .join(srcV, eRen(eSrcId(name)) === srcV(vId(srcName)))
         .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName)))
 
