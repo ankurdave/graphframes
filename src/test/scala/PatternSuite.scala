@@ -17,8 +17,6 @@
 
 import org.scalatest.FunSuite
 
-import scala.util.parsing.combinator._
-
 class PatternSuite extends FunSuite {
 
   test("parser") {

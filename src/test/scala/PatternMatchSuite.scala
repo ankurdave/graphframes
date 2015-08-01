@@ -31,15 +31,15 @@ class PatternMatchSuite extends FunSuite {
   import sqlContext.implicits._
 
   val v = sqlContext.createDataFrame(List(
-      (0L, "a"),
-      (1L, "b"),
-      (2L, "c"),
-      (3L, "d"))).toDF("id", "attr")
-    val e = sqlContext.createDataFrame(List(
-      (0L, 1L),
-      (1L, 2L),
-      (2L, 3L),
-      (2L, 0L))).toDF("src_id", "dst_id")
+    (0L, "a"),
+    (1L, "b"),
+    (2L, "c"),
+    (3L, "d"))).toDF("id", "attr")
+  val e = sqlContext.createDataFrame(List(
+    (0L, 1L),
+    (1L, 2L),
+    (2L, 3L),
+    (2L, 0L))).toDF("src_id", "dst_id")
   val g = GraphFrame(v, e)
 
   test("triplets") {
@@ -75,4 +75,16 @@ class PatternMatchSuite extends FunSuite {
     ))
   }
 
+ test("vertex queries") {
+    val vertices = g.find("(a)")
+    assert(vertices.columns === Array("a_id", "a_attr"))
+    assert(vertices.collect.toSet === v.collect.toSet)
+
+    val edges = g.find("()-[e]->(); (e_src)")
+    assert(edges.columns === Array("e_src_id", "e_dst_id"))
+    assert(edges.collect.toSet === e.collect.toSet)
+
+    val empty = g.find("()")
+    assert(empty.collect === Array.empty)
+  }
 }

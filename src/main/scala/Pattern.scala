@@ -82,9 +82,9 @@ sealed trait Vertex extends Pattern
 
 case class AnonymousVertex() extends Vertex
 
-case class NamedVertex(name: String) extends Vertex
-
 case class VertexReference(name: String) extends Vertex
+
+case class NamedVertex(name: String) extends Vertex
 
 sealed trait Edge extends Pattern
 
