@@ -36,24 +36,4 @@ class PatternSuite extends FunSuite {
       Seq(NamedVertex("u"), AnonymousEdge(AnonymousVertex(), NamedVertex("v"))))
   }
 
-  test("references") {
-    assert(Pattern.parse("(a)-[]->(b); (b)-[]->(c)") ===
-      Seq(
-        AnonymousEdge(NamedVertex("a"), NamedVertex("b")),
-        AnonymousEdge(VertexReference("b"), NamedVertex("c"))))
-
-    assert(Pattern.parse("(a)-[]->(b); (b)-[]->(c); (c)-[]->(a)") ===
-      Seq(
-        AnonymousEdge(NamedVertex("a"), NamedVertex("b")),
-        AnonymousEdge(VertexReference("b"), NamedVertex("c")),
-        AnonymousEdge(VertexReference("c"), VertexReference("a"))))
-
-    assert(Pattern.parse("()-[e1]->(); (e1_dst)-[e2]->(); (e2_dst)-[]->(e1_src)") ===
-      Seq(
-        NamedEdge("e1", AnonymousVertex(), AnonymousVertex()),
-        NamedEdge("e2", VertexReference("e1_dst"), AnonymousVertex()),
-        AnonymousEdge(VertexReference("e2_dst"), VertexReference("e1_src"))))
-
-  }
-
 }

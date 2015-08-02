@@ -54,24 +54,14 @@ class PatternMatchSuite extends FunSuite {
     ))
   }
 
-  test("triangles with vertex attributes") {
-    val triangles = g.find("(a)-[]->(b); (b)-[]->(c); (c)-[]->(a)")
+  test("triangles") {
+    val triangles = g.find("(a)-[]->(b); (b)-[]->(c); (c)-[]->(a)",
+      _.select("a_id", "b_id", "c_id"))
 
-    assert(triangles.columns === Array("a_id", "a_attr", "b_id", "b_attr", "c_id", "c_attr"))
     assert(triangles.collect.toSet === Set(
-      Row(0L, "a", 1L, "b", 2L, "c"),
-      Row(2L, "c", 0L, "a", 1L, "b"),
-      Row(1L, "b", 2L, "c", 0L, "a")
-    ))
-  }
-
-  test("triangles without vertex attributes") {
-    val triangles = g.find("()-[e1]->(); (e1_dst)-[e2]->(); (e2_dst)-[]->(e1_src)")
-    assert(triangles.columns === Array("e1_src_id", "e1_dst_id", "e2_src_id", "e2_dst_id"))
-    assert(triangles.drop("e1_dst_id").collect.toSet === Set(
       Row(0L, 1L, 2L),
-      Row(1L, 2L, 0L),
-      Row(2L, 0L, 1L)
+      Row(2L, 0L, 1L),
+      Row(1L, 2L, 0L)
     ))
   }
 
@@ -79,10 +69,6 @@ class PatternMatchSuite extends FunSuite {
     val vertices = g.find("(a)")
     assert(vertices.columns === Array("a_id", "a_attr"))
     assert(vertices.collect.toSet === v.collect.toSet)
-
-    val edges = g.find("()-[e]->(); (e_src)")
-    assert(edges.columns === Array("e_src_id", "e_dst_id"))
-    assert(edges.collect.toSet === e.collect.toSet)
 
     val empty = g.find("()")
     assert(empty.collect === Array.empty)

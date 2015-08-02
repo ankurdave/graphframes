@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+import scala.collection.mutable
 import scala.reflect.runtime.universe.TypeTag
 
 import org.apache.spark.HashPartitioner
@@ -45,19 +46,40 @@ class GraphFrame protected (
   def vertices = v
   def edges = e
 
+  private val views = mutable.Map[Seq[Pattern], DataFrame]()
+
   private def sqlContext = v.sqlContext
 
   /** Default constructor is provided to support serialization */
   protected def this() = this(null, null)
 
   def find(pattern: String): DataFrame =
-    find(Pattern.parse(pattern))
+    find(pattern, identity)
 
-  def find(patterns: Seq[Pattern]): DataFrame = {
-    patterns.foldLeft[Option[DataFrame]](None) {
-      case (acc, p) => findIncremental(acc, p)
-    }.getOrElse(sqlContext.emptyDataFrame)
+  def find(pattern: String, f: DataFrame => DataFrame): DataFrame =
+    find1(Pattern.parse(pattern), f)
+
+  private def find1(patterns: Seq[Pattern], f: DataFrame => DataFrame): DataFrame = {
+    require(patterns.nonEmpty)
+    val plans = mutable.Map[Seq[Pattern], Option[DataFrame]]()
+    plans(Seq.empty) = None
+    for {
+      length <- 1 to patterns.size
+      comb <- patterns.combinations(length)
+      subseq <- comb.permutations
+      cur = subseq.last
+      prev = subseq.init
+    } {
+      plans(subseq) = views.get(subseq).orElse(findIncremental(prev, plans(prev), cur))
+    }
+
+    val finalPlans = patterns.permutations.flatMap(plans(_)).map(f).toSeq
+    println(s"${finalPlans.size} plans for find($patterns):")
+    for (p <- finalPlans) println(p.queryExecution.optimizedPlan)
+    if (finalPlans.nonEmpty) finalPlans.minBy(cost) else f(sqlContext.emptyDataFrame)
   }
+
+  private def cost(df: DataFrame): Int = 0
 
   private def prefixWithName(name: String, col: String) = name + "_" + col
   private def vId(name: String) = prefixWithName(name, "id")
@@ -79,69 +101,92 @@ class GraphFrame protected (
       case None => b
     }
 
-  private def findIncremental(prev: Option[DataFrame], p: Pattern): Option[DataFrame] = p match {
+  private def seen(v: NamedVertex, ps: Seq[Pattern]) = ps.exists(p => seen1(v, p))
+  private def seen1(v: NamedVertex, p: Pattern): Boolean = p match {
+    case AnonymousEdge(src, dst) =>
+      seen1(v, src) || seen1(v, dst)
+    case NamedEdge(_, src, dst) =>
+      seen1(v, src) || seen1(v, dst)
+    case v2 @ NamedVertex(_) =>
+      v2 == v
+    case AnonymousVertex() =>
+      false
+  }
+
+  private def findIncremental(
+      prevPatterns: Seq[Pattern],
+      prev: Option[DataFrame],
+      p: Pattern): Option[DataFrame] = p match {
+
     case AnonymousVertex() =>
       prev
 
-    case VertexReference(name) =>
-      for (prev <- prev) assert(prev.columns.toSet.contains(vId(name)))
-      prev
-
-    case NamedVertex(name) =>
-      Some(maybeJoin(prev, pfxV(name)))
+    case v @ NamedVertex(name) =>
+      if (seen(v, prevPatterns)) {
+        for (prev <- prev) assert(prev.columns.toSet.contains(vId(name)))
+        prev
+      } else {
+        Some(maybeJoin(prev, pfxV(name)))
+      }
 
     case NamedEdge(name, AnonymousVertex(), AnonymousVertex()) =>
       val eRen = pfxE(name)
       Some(maybeJoin(prev, eRen))
 
-    case NamedEdge(name, AnonymousVertex(), VertexReference(dstName)) =>
-      val eRen = pfxE(name)
-      Some(maybeJoin(prev, eRen, prev => eRen(eDstId(name)) === prev(vId(dstName))))
+    case NamedEdge(name, AnonymousVertex(), dst @ NamedVertex(dstName)) =>
+      if (seen(dst, prevPatterns)) {
+        val eRen = pfxE(name)
+        Some(maybeJoin(prev, eRen, prev => eRen(eDstId(name)) === prev(vId(dstName))))
+      } else {
+        val eRen = pfxE(name)
+        val dstV = pfxV(dstName)
+        Some(maybeJoin(prev, eRen)
+          .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName)), "left_outer"))
+      }
 
-    case NamedEdge(name, AnonymousVertex(), NamedVertex(dstName)) =>
-      val eRen = pfxE(name)
-      val dstV = pfxV(dstName)
-      Some(maybeJoin(prev, eRen)
-        .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName))))
+    case NamedEdge(name, src @ NamedVertex(srcName), AnonymousVertex()) =>
+      if (seen(src, prevPatterns)) {
+        val eRen = pfxE(name)
+        Some(maybeJoin(prev, eRen, prev => eRen(eSrcId(name)) === prev(vId(srcName))))
+      } else {
+        val eRen = pfxE(name)
+        val srcV = pfxV(srcName)
+        Some(maybeJoin(prev, eRen)
+          .join(srcV, eRen(eSrcId(name)) === srcV(vId(srcName)), "left_outer"))
+      }
 
-    case NamedEdge(name, VertexReference(srcName), AnonymousVertex()) =>
-      val eRen = pfxE(name)
-      Some(maybeJoin(prev, eRen, prev => eRen(eSrcId(name)) === prev(vId(srcName))))
+    case NamedEdge(name, src @ NamedVertex(srcName), dst @ NamedVertex(dstName)) =>
+      (seen(src, prevPatterns), seen(dst, prevPatterns)) match {
+        case (true, true) =>
+          val eRen = pfxE(name)
+          Some(maybeJoin(prev, eRen, prev =>
+            eRen(eSrcId(name)) === prev(vId(srcName)) && eRen(eDstId(name)) === prev(vId(dstName))))
 
-    case NamedEdge(name, VertexReference(srcName), VertexReference(dstName)) =>
-      val eRen = pfxE(name)
-      Some(maybeJoin(prev, eRen, prev =>
-        eRen(eSrcId(name)) === prev(vId(srcName)) && eRen(eDstId(name)) === prev(vId(dstName))))
+        case (true, false) =>
+          val eRen = pfxE(name)
+          val dstV = pfxV(dstName)
+          Some(maybeJoin(prev, eRen, prev => eRen(eSrcId(name)) === prev(vId(srcName)))
+            .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName)), "left_outer"))
 
-    case NamedEdge(name, VertexReference(srcName), NamedVertex(dstName)) =>
-      val eRen = pfxE(name)
-      val dstV = pfxV(dstName)
-      Some(maybeJoin(prev, eRen, prev => eRen(eSrcId(name)) === prev(vId(srcName)))
-        .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName))))
+        case (false, true) =>
+          val eRen = pfxE(name)
+          val srcV = pfxV(srcName)
+          Some(maybeJoin(prev, eRen, prev => eRen(eDstId(name)) === prev(vId(dstName)))
+            .join(srcV, eRen(eSrcId(name)) === srcV(vId(srcName)), "left_outer"))
 
-    case NamedEdge(name, NamedVertex(srcName), AnonymousVertex()) =>
-      val eRen = pfxE(name)
-      val srcV = pfxV(srcName)
-      Some(maybeJoin(prev, eRen)
-        .join(srcV, eRen(eSrcId(name)) === srcV(vId(srcName))))
-
-    case NamedEdge(name, NamedVertex(srcName), VertexReference(dstName)) =>
-      val eRen = pfxE(name)
-      val srcV = pfxV(srcName)
-      Some(maybeJoin(prev, eRen, prev => eRen(eDstId(name)) === prev(vId(dstName)))
-        .join(srcV, eRen(eSrcId(name)) === srcV(vId(srcName))))
-
-    case NamedEdge(name, NamedVertex(srcName), NamedVertex(dstName)) =>
-      val eRen = pfxE(name)
-      val srcV = pfxV(srcName)
-      val dstV = pfxV(dstName)
-      Some(maybeJoin(prev, eRen)
-        .join(srcV, eRen(eSrcId(name)) === srcV(vId(srcName)))
-        .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName))))
+        case (false, false) =>
+          val eRen = pfxE(name)
+          val srcV = pfxV(srcName)
+          val dstV = pfxV(dstName)
+          Some(maybeJoin(prev, eRen)
+            .join(srcV, eRen(eSrcId(name)) === srcV(vId(srcName)), "left_outer")
+            .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName)), "left_outer"))
+          // TODO: expose the plans from joining these in the opposite order
+      }
 
     case AnonymousEdge(src, dst) =>
       val tmpName = "__tmp"
-      val result = findIncremental(prev, NamedEdge(tmpName, src, dst))
+      val result = findIncremental(prevPatterns, prev, NamedEdge(tmpName, src, dst))
       result.map(dropAll(_, e.columns.map(col => prefixWithName(tmpName, col))))
   }
 
