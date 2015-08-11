@@ -17,6 +17,8 @@
 
 import scala.collection.mutable
 import scala.reflect.runtime.universe.TypeTag
+import scala.util.Success
+import scala.util.Try
 
 import org.apache.spark.HashPartitioner
 import org.apache.spark.rdd.{RDD, ShuffledRDD}
@@ -61,8 +63,8 @@ class GraphFrame protected (
 
   private def find1(patterns: Seq[Pattern], f: DataFrame => DataFrame): DataFrame = {
     require(patterns.nonEmpty)
-    val plans = mutable.Map[Seq[Pattern], Option[DataFrame]]()
-    plans(Seq.empty) = None
+    val plans = mutable.Map[Seq[Pattern], Try[Option[DataFrame]]]()
+    plans(Seq.empty) = Success(None)
     for {
       length <- 1 to patterns.size
       comb <- patterns.combinations(length)
@@ -70,12 +72,15 @@ class GraphFrame protected (
       cur = subseq.last
       prev = subseq.init
     } {
-      plans(subseq) = views.get(subseq).orElse(findIncremental(prev, plans(prev), cur))
+      plans(subseq) = views.get(subseq) match {
+        case Some(view) => Success(Some(view))
+        case None => plans(prev).flatMap(prevDF => Try(findIncremental(prev, prevDF, cur)))
+      }
     }
 
-    val finalPlans = patterns.permutations.flatMap(plans(_)).map(f).toSeq
-    println(s"${finalPlans.size} plans for find($patterns):")
-    for (p <- finalPlans) println(p.queryExecution.optimizedPlan)
+    val finalPlans = patterns.permutations.flatMap(plans(_).toOption).flatten.map(f).toSeq
+    // println(s"${finalPlans.size} plans for find($patterns):")
+    // for (p <- finalPlans) println(p.queryExecution.optimizedPlan)
     if (finalPlans.nonEmpty) finalPlans.minBy(cost) else f(sqlContext.emptyDataFrame)
   }
 
@@ -103,6 +108,8 @@ class GraphFrame protected (
 
   private def seen(v: NamedVertex, ps: Seq[Pattern]) = ps.exists(p => seen1(v, p))
   private def seen1(v: NamedVertex, p: Pattern): Boolean = p match {
+    case Negation(edge) =>
+      seen1(v, edge)
     case AnonymousEdge(src, dst) =>
       seen1(v, src) || seen1(v, dst)
     case NamedEdge(_, src, dst) =>
@@ -188,6 +195,13 @@ class GraphFrame protected (
       val tmpName = "__tmp"
       val result = findIncremental(prevPatterns, prev, NamedEdge(tmpName, src, dst))
       result.map(dropAll(_, e.columns.map(col => prefixWithName(tmpName, col))))
+
+    case Negation(edge) => prev match {
+      case Some(prev) =>
+        findIncremental(prevPatterns, Some(prev), edge).map(result => prev.except(result))
+      case None => throw new InvalidPatternException
+    }
+
   }
 
   private def dropAll(df: DataFrame, columns: Seq[String]): DataFrame =
@@ -201,3 +215,5 @@ class GraphFrame protected (
     df.select(colNames : _*)
   }
 }
+
+private class InvalidPatternException() extends Exception()

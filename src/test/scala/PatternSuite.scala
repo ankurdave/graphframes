@@ -34,6 +34,13 @@ class PatternSuite extends FunSuite {
 
     assert(Pattern.parse("(u); ()-[]->(v)") ===
       Seq(NamedVertex("u"), AnonymousEdge(AnonymousVertex(), NamedVertex("v"))))
+
+    assert(Pattern.parse("(u)-[]->(v); (v)-[]->(w); !(u)-[]->(w)") ===
+      Seq(
+        AnonymousEdge(NamedVertex("u"), NamedVertex("v")),
+        AnonymousEdge(NamedVertex("v"), NamedVertex("w")),
+        Negation(
+          AnonymousEdge(NamedVertex("u"), NamedVertex("w")))))
   }
 
 }

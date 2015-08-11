@@ -32,7 +32,12 @@ object PatternParser extends RegexParsers {
     }
   def edge: Parser[Edge] = namedEdge | anonymousEdge
 
-  def pattern: Parser[Pattern] = edge | vertex
+  def negatedEdge: Parser[Pattern] =
+    "!" ~ edge ^^ {
+      case "!" ~ edge => Negation(edge)
+    }
+
+  def pattern: Parser[Pattern] = edge | vertex | negatedEdge
 
   def patterns: Parser[List[Pattern]] = repsep(pattern, ";")
 }
@@ -45,6 +50,8 @@ object Pattern {
 }
 
 sealed trait Pattern
+
+case class Negation(child: Edge) extends Pattern
 
 sealed trait Vertex extends Pattern
 

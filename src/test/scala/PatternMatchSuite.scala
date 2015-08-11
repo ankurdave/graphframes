@@ -65,12 +65,19 @@ class PatternMatchSuite extends FunSuite {
     ))
   }
 
- test("vertex queries") {
+  test("vertex queries") {
     val vertices = g.find("(a)")
     assert(vertices.columns === Array("a_id", "a_attr"))
     assert(vertices.collect.toSet === v.collect.toSet)
 
     val empty = g.find("()")
     assert(empty.collect === Array.empty)
+  }
+
+  test("negation") {
+    val fof = g.find("(u)-[]->(v); (v)-[]->(w); !(u)-[]->(w); !(w)-[]->(u)",
+      _.select("u_id", "v_id", "w_id"))
+
+    assert(fof.collect.toSet === Set(Row(1L, 2L, 3L)))
   }
 }
