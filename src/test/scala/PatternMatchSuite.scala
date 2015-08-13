@@ -28,8 +28,6 @@ class PatternMatchSuite extends FunSuite {
   val sc = new SparkContext("local", "test")
   val sqlContext = new SQLContext(sc)
 
-  import sqlContext.implicits._
-
   val v = sqlContext.createDataFrame(List(
     (0L, "a"),
     (1L, "b"),
