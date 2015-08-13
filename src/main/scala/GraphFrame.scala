@@ -36,7 +36,9 @@ object GraphFrame {
   def apply(v: DataFrame, e: DataFrame): GraphFrame = {
     require(v.columns.contains("id"))
     require(e.columns.contains("src_id") && e.columns.contains("dst_id"))
-    new GraphFrame(v, e)
+    val vK = v.uniqueKey("id")
+    val eK = e.foreignKey("src_id", vK, "id").foreignKey("dst_id", vK, "id")
+    new GraphFrame(vK, eK)
   }
 }
 
@@ -148,7 +150,7 @@ class GraphFrame protected (
         val eRen = pfxE(name)
         val dstV = pfxV(dstName)
         Some(maybeJoin(prev, eRen)
-          .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName))))
+          .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName)), "left_outer"))
       }
 
     case NamedEdge(name, src @ NamedVertex(srcName), AnonymousVertex()) =>
@@ -159,7 +161,7 @@ class GraphFrame protected (
         val eRen = pfxE(name)
         val srcV = pfxV(srcName)
         Some(maybeJoin(prev, eRen)
-          .join(srcV, eRen(eSrcId(name)) === srcV(vId(srcName))))
+          .join(srcV, eRen(eSrcId(name)) === srcV(vId(srcName)), "left_outer"))
       }
 
     case NamedEdge(name, src @ NamedVertex(srcName), dst @ NamedVertex(dstName)) =>
@@ -173,21 +175,21 @@ class GraphFrame protected (
           val eRen = pfxE(name)
           val dstV = pfxV(dstName)
           Some(maybeJoin(prev, eRen, prev => eRen(eSrcId(name)) === prev(vId(srcName)))
-            .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName))))
+            .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName)), "left_outer"))
 
         case (false, true) =>
           val eRen = pfxE(name)
           val srcV = pfxV(srcName)
           Some(maybeJoin(prev, eRen, prev => eRen(eDstId(name)) === prev(vId(dstName)))
-            .join(srcV, eRen(eSrcId(name)) === srcV(vId(srcName))))
+            .join(srcV, eRen(eSrcId(name)) === srcV(vId(srcName)), "left_outer"))
 
         case (false, false) =>
           val eRen = pfxE(name)
           val srcV = pfxV(srcName)
           val dstV = pfxV(dstName)
           Some(maybeJoin(prev, eRen)
-            .join(srcV, eRen(eSrcId(name)) === srcV(vId(srcName)))
-            .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName))))
+            .join(srcV, eRen(eSrcId(name)) === srcV(vId(srcName)), "left_outer")
+            .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName)), "left_outer"))
           // TODO: expose the plans from joining these in the opposite order
       }
 

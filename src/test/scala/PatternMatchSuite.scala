@@ -80,4 +80,26 @@ class PatternMatchSuite extends FunSuite {
 
     assert(fof.collect.toSet === Set(Row(1L, 2L, 3L)))
   }
+
+  test("join elimination - simple") {
+    import org.apache.spark.sql.catalyst.plans.logical.Join
+
+    val edges = g.find("(u)-[e]->(v)", _.select("e_src_id", "e_dst_id"))
+    val joins = edges.queryExecution.optimizedPlan.collect {
+      case j: Join => j
+    }
+
+    assert(joins.isEmpty)
+  }
+
+  test("join elimination - with aliases") {
+    import org.apache.spark.sql.catalyst.plans.logical.Join
+
+    val edges = g.find("(u)-[]->(v)", _.select("u_id", "v_id"))
+    println(edges.queryExecution.optimizedPlan)
+    val joins = edges.queryExecution.optimizedPlan.collect {
+      case j: Join => j
+    }
+    assert(joins.isEmpty)
+  }
 }
