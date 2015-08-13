@@ -62,7 +62,8 @@ class GraphFrame protected (
     find(pattern, identity)
 
   def find(pattern: String, f: DataFrame => DataFrame): DataFrame =
-    find1(Pattern.parse(pattern), f)
+    // find1(Pattern.parse(pattern), f)
+    f(findSimple(Nil, None, Pattern.parse(pattern)))
 
   private def find1(patterns: Seq[Pattern], f: DataFrame => DataFrame): DataFrame = {
     require(patterns.nonEmpty)
@@ -90,6 +91,15 @@ class GraphFrame protected (
   private def cost(df: DataFrame): Int = df.queryExecution.optimizedPlan.collect {
     case j: Join => j
   }.size
+
+  private def findSimple(prevPatterns: Seq[Pattern], prevDF: Option[DataFrame], remainingPatterns: Seq[Pattern]): DataFrame = {
+    remainingPatterns match {
+      case Nil => prevDF.getOrElse(sqlContext.emptyDataFrame)
+      case cur :: rest =>
+        val df = findIncremental(prevPatterns, prevDF, cur)
+        findSimple(prevPatterns :+ cur, df, rest)
+    }
+  }
 
   private def prefixWithName(name: String, col: String) = name + "_" + col
   private def vId(name: String) = prefixWithName(name, "id")
