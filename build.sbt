@@ -28,6 +28,9 @@ scalacOptions ++= Seq(
   "-Xfuture",
   "-Ywarn-unused-import"
 )
+
+scalacOptions in (Compile, console) := Seq()
+
 // Run tests with more memory
 javaOptions in test += "-Xmx2G"
 
