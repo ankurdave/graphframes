@@ -27,9 +27,10 @@ import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.catalyst.ScalaReflection
 import org.apache.spark.sql.catalyst.expressions.Literal
+import org.apache.spark.sql.catalyst.plans.logical.Join
+import org.apache.spark.sql.types.IntegerType
 import org.apache.spark.sql.types.StructField
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.types.IntegerType
 import org.apache.spark.storage.StorageLevel
 
 object GraphFrame {
@@ -82,11 +83,13 @@ class GraphFrame protected (
 
     val finalPlans = patterns.permutations.flatMap(plans(_).toOption).flatten.map(f).toSeq
     // println(s"${finalPlans.size} plans for find($patterns):")
-    // for (p <- finalPlans) println(p.queryExecution.optimizedPlan)
+    // for (p <- finalPlans) println(s"${cost(p)}   ${p.queryExecution.optimizedPlan}")
     if (finalPlans.nonEmpty) finalPlans.minBy(cost) else f(sqlContext.emptyDataFrame)
   }
 
-  private def cost(df: DataFrame): Int = 0
+  private def cost(df: DataFrame): Int = df.queryExecution.optimizedPlan.collect {
+    case j: Join => j
+  }.size
 
   private def prefixWithName(name: String, col: String) = name + "_" + col
   private def vId(name: String) = prefixWithName(name, "id")
