@@ -25,7 +25,7 @@ import org.apache.spark.sql.Row
 class PatternMatchSuite extends FunSuite {
 
   val conf = new SparkConf()
-  val sc = new SparkContext("local", "test")
+  val sc = new SparkContext("local", "test", conf)
   val sqlContext = new SQLContext(sc)
 
   val v = sqlContext.createDataFrame(List(

@@ -63,30 +63,33 @@ class GraphFrame protected (
     find(pattern, identity)
 
   def find(pattern: String, f: DataFrame => DataFrame): DataFrame =
-    // find1(Pattern.parse(pattern), f)
-    f(findSimple(Nil, None, Pattern.parse(pattern)))
+    find1(Pattern.parse(pattern), f)
+    // f(findSimple(Nil, None, Pattern.parse(pattern)))
 
   private def find1(patterns: Seq[Pattern], f: DataFrame => DataFrame): DataFrame = {
-    require(patterns.nonEmpty)
-    val plans = mutable.Map[Seq[Pattern], Try[Option[DataFrame]]]()
-    plans(Seq.empty) = Success(None)
-    for {
-      length <- 1 to patterns.size
-      comb <- patterns.combinations(length)
-      subseq <- comb.permutations
-      cur = subseq.last
-      prev = subseq.init
-    } {
-      plans(subseq) = views.get(subseq) match {
-        case Some(view) => Success(Some(view))
-        case None => plans(prev).flatMap(prevDF => Try(findIncremental(prev, prevDF, cur)))
+    if (patterns.isEmpty) {
+      sqlContext.emptyDataFrame
+    } else {
+      val plans = mutable.Map[Seq[Pattern], Try[Option[DataFrame]]]()
+      plans(Seq.empty) = Success(None)
+      for {
+        length <- 1 to patterns.size
+        comb <- patterns.combinations(length)
+        subseq <- comb.permutations
+        cur = subseq.last
+        prev = subseq.init
+      } {
+        plans(subseq) = views.get(subseq) match {
+          case Some(view) => Success(Some(view))
+          case None => plans(prev).flatMap(prevDF => Try(findIncremental(prev, prevDF, cur)))
+        }
       }
-    }
 
-    val finalPlans = patterns.permutations.flatMap(plans(_).toOption).flatten.map(f).toSeq
-    // println(s"${finalPlans.size} plans for find($patterns):")
-    // for (p <- finalPlans) println(s"${cost(p)}   ${p.queryExecution.optimizedPlan}")
-    if (finalPlans.nonEmpty) finalPlans.minBy(cost) else f(sqlContext.emptyDataFrame)
+      val finalPlans = patterns.permutations.flatMap(plans(_).toOption).flatten.map(f).toSeq
+      // println(s"${finalPlans.size} plans for find($patterns):")
+      // for (p <- finalPlans) println(s"${cost(p)}   ${p.queryExecution.optimizedPlan}")
+      if (finalPlans.nonEmpty) finalPlans.minBy(cost) else f(sqlContext.emptyDataFrame)
+    }
   }
 
   private def cost(df: DataFrame): Int = df.queryExecution.optimizedPlan.collect {
