@@ -68,6 +68,7 @@ class GraphFrame protected (
 
   def registerView(pattern: String, v: DataFrame): Unit = {
     views.put(Pattern.parse(pattern), v)
+    ()
   }
 
   private def find1(patterns: Seq[Pattern], f: DataFrame => DataFrame): DataFrame = {
