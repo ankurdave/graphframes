@@ -66,6 +66,10 @@ class GraphFrame protected (
     find1(Pattern.parse(pattern), f)
     // f(findSimple(Nil, None, Pattern.parse(pattern)))
 
+  def registerView(pattern: String, v: DataFrame): Unit = {
+    views.put(Pattern.parse(pattern), v)
+  }
+
   private def find1(patterns: Seq[Pattern], f: DataFrame => DataFrame): DataFrame = {
     if (patterns.isEmpty) {
       sqlContext.emptyDataFrame
