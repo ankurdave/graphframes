@@ -39,7 +39,7 @@ object GraphFrame {
     require(e.columns.contains("src_id") && e.columns.contains("dst_id"))
     val vK = v.uniqueKey("id")
     vK.registerTempTable("vK")
-    val eK = e.foreignKey("src_id", "vK.id").foreignKey("dst_id", "vK.id")
+    val eK = e.foreignKey("src_id", vK, "id").foreignKey("dst_id", vK, "id")
     new GraphFrame(vK, eK)
   }
 }
