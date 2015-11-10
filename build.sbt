@@ -4,13 +4,13 @@ version := "0.1-SNAPSHOT"
 
 organization := "edu.berkeley.cs.amplab"
 
-scalaVersion := "2.11.7"
+scalaVersion := "2.10.4"
 
 licenses += "Apache-2.0" -> url("http://www.apache.org/licenses/LICENSE-2.0.html")
 
-libraryDependencies += "org.apache.spark" %% "spark-core" % "1.5.0-SNAPSHOT"
+libraryDependencies += "org.apache.spark" %% "spark-core" % "1.6.0-SNAPSHOT"
 
-libraryDependencies += "org.apache.spark" %% "spark-sql" % "1.5.0-SNAPSHOT"
+libraryDependencies += "org.apache.spark" %% "spark-sql" % "1.6.0-SNAPSHOT"
 
 libraryDependencies += "org.scalatest" %% "scalatest" % "2.2.5"
 
@@ -25,8 +25,8 @@ scalacOptions ++= Seq(
   "-Ywarn-dead-code",
   "-Ywarn-numeric-widen",
   "-Ywarn-value-discard",
-  "-Xfuture",
-  "-Ywarn-unused-import"
+  "-Xfuture"// ,
+  // "-Ywarn-unused-import"
 )
 
 scalacOptions in (Compile, console) := Seq()
