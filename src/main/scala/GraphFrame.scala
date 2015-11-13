@@ -63,8 +63,8 @@ class GraphFrame protected (
     find(pattern, identity)
 
   def find(pattern: String, f: DataFrame => DataFrame): DataFrame =
-    find1(Pattern.parse(pattern), f)
-    // f(findSimple(Nil, None, Pattern.parse(pattern)))
+    // find1(Pattern.parse(pattern), f)
+    f(findSimple(Nil, None, Pattern.parse(pattern)))
 
   def registerView(pattern: String, v: DataFrame): Unit = {
     views.put(Pattern.parse(pattern), v)
@@ -85,7 +85,9 @@ class GraphFrame protected (
         prev = subseq.init
       } {
         plans(subseq) = views.get(subseq) match {
-          case Some(view) => Success(Some(view))
+          case Some(view) =>
+            println("Using a view for " + subseq)
+            Success(Some(view))
           case None => plans(prev).flatMap(prevDF => Try(findIncremental(prev, prevDF, cur)))
         }
       }
