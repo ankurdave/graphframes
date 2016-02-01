@@ -37,9 +37,9 @@ object GraphFrame {
   def apply(v: DataFrame, e: DataFrame): GraphFrame = {
     require(v.columns.contains("id"))
     require(e.columns.contains("src_id") && e.columns.contains("dst_id"))
-    val vK = v.uniqueKey("id")
+    val vK = v//.uniqueKey("id")
     vK.registerTempTable("vK")
-    val eK = e.foreignKey("src_id", vK, "id").foreignKey("dst_id", vK, "id")
+    val eK = e//.foreignKey("src_id", vK, "id").foreignKey("dst_id", vK, "id")
     new GraphFrame(vK, eK)
   }
 }
@@ -63,45 +63,17 @@ class GraphFrame protected (
     find(pattern, identity)
 
   def find(pattern: String, f: DataFrame => DataFrame): DataFrame =
-    // find1(Pattern.parse(pattern), f)
-    f(findSimple(Nil, None, Pattern.parse(pattern)))
+    try {
+      f(findUsingPlanner(Pattern.parse(pattern)))
+    } catch {
+      case _: UnsupportedOperationException =>
+        f(findSimple(Nil, None, Pattern.parse(pattern)))
+    }
 
   def registerView(pattern: String, v: DataFrame): Unit = {
     views.put(Pattern.parse(pattern), v)
     ()
   }
-
-  private def find1(patterns: Seq[Pattern], f: DataFrame => DataFrame): DataFrame = {
-    if (patterns.isEmpty) {
-      sqlContext.emptyDataFrame
-    } else {
-      val plans = mutable.Map[Seq[Pattern], Try[Option[DataFrame]]]()
-      plans(Seq.empty) = Success(None)
-      for {
-        length <- 1 to patterns.size
-        comb <- patterns.combinations(length)
-        subseq <- comb.permutations
-        cur = subseq.last
-        prev = subseq.init
-      } {
-        plans(subseq) = views.get(subseq) match {
-          case Some(view) =>
-            println("Using a view for " + subseq)
-            Success(Some(view))
-          case None => plans(prev).flatMap(prevDF => Try(findIncremental(prev, prevDF, cur)))
-        }
-      }
-
-      val finalPlans = patterns.permutations.flatMap(plans(_).toOption).flatten.map(f).toSeq
-      // println(s"${finalPlans.size} plans for find($patterns):")
-      // for (p <- finalPlans) println(s"${cost(p)}   ${p.queryExecution.optimizedPlan}")
-      if (finalPlans.nonEmpty) finalPlans.minBy(cost) else f(sqlContext.emptyDataFrame)
-    }
-  }
-
-  private def cost(df: DataFrame): Int = df.queryExecution.optimizedPlan.collect {
-    case j: Join => j
-  }.size
 
   private def findSimple(prevPatterns: Seq[Pattern], prevDF: Option[DataFrame], remainingPatterns: Seq[Pattern]): DataFrame = {
     remainingPatterns match {
@@ -110,6 +82,57 @@ class GraphFrame protected (
         val df = findIncremental(prevPatterns, prevDF, cur)
         findSimple(prevPatterns :+ cur, df, rest)
     }
+  }
+
+  private def findUsingPlanner(patterns: Seq[Pattern]): DataFrame = {
+    import core.algo.patternmatching.views.ProcessViews
+    import core.algo.patternmatching.views.View
+    import core.query.Query
+    import core.data.CostEstimator
+    import core.data.Partitioning.SourceVertexPartitioning
+    import core.query.plan.QueryPlanNode
+    import core.query.plan.QueryPlanNodeType
+    import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+    import scala.collection.JavaConverters._
+
+    def patternToString(ps: Seq[Pattern]) = ps.map {
+      case AnonymousEdge(NamedVertex(src), NamedVertex(dst)) =>
+        src + " 0 " + dst
+      case NamedEdge(_, NamedVertex(src), NamedVertex(dst)) =>
+        src + " 0 " + dst
+      case _ => throw new UnsupportedOperationException(ps.toString)
+    }.mkString("\n")
+
+    def planToCatalyst(plan: QueryPlanNode): LogicalPlan = {
+      plan.`type` match {
+        case QueryPlanNodeType.LOCAL_EXECUTION =>
+          val p = plan.getGraphQuery.getEdges.asScala.toSeq
+            .map(e => AnonymousEdge(NamedVertex(e.head), NamedVertex(e.tail)))
+          g.find(p).queryExecution.logical
+        case _ =>
+          plan.getAllChildren.map(planToCatalyst(_))
+            .reduceLeft((l, r) => Join(l, r, joinType = Inner,)
+      }
+    }
+
+    val ht = new java.util.Hashtable[java.lang.String, Query]
+    val ces = new java.util.Vector[CostEstimator]
+    ces.addElement(new CostEstimator("stats/amazon.stats"))
+    ProcessViews.findPlan(
+      patternToString(patterns),
+      ht,
+      edges.rdd.partitions.length,
+      ces.get(0),
+      new java.util.Vector[View],
+      "DYNAMICPROGRAMMINGBUSHY",
+      new SourceVertexPartitioning)
+
+    val sol = ProcessViews.findMinCostSolution(patternToString(patterns), ht)
+    val plan = sol.getPlan()
+    plan.assignNodeID()
+    println(plan.toString(0, ces.get(0)))
+
+    findSimple(Nil, None, patterns)
   }
 
   private def prefixWithName(name: String, col: String) = name + "_" + col

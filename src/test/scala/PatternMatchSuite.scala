@@ -100,4 +100,9 @@ class PatternMatchSuite extends FunSuite {
     }
     assert(joins.isEmpty)
   }
+
+  test("HVA Q4") {
+    val q4 = g.find(
+      "(a)-[]->(b); (b)-[]->(a); (c)-[]->(b); (b)-[]->(d); (c)-[]->(e); (b)-[]->(e); (c)-[]->(d)")
+  }
 }
