@@ -17,7 +17,6 @@
 
 package org.graphframes.lib
 
-import org.apache.spark.Logging
 import org.apache.spark.sql.SQLHelpers._
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.functions.col
@@ -27,7 +26,7 @@ import org.graphframes.GraphFrame
 import GraphFrame.nestAsCol
 
 
-object BFS extends Logging with Serializable {
+object BFS extends Serializable {
 
   /**
    * Breadth-first search (BFS)
@@ -161,10 +160,10 @@ object BFS extends Logging with Serializable {
       iter += 1
     }
     if (foundPath) {
-      logInfo(s"GraphFrame.bfs found path of length $iter.")
+      println(s"GraphFrame.bfs found path of length $iter.")
       paths
     } else {
-      logInfo(s"GraphFrame.bfs failed to find a path of length <= $maxPathLength.")
+      println(s"GraphFrame.bfs failed to find a path of length <= $maxPathLength.")
       // Return empty DataFrame
       g.sqlContext.createDataFrame(
         g.sqlContext.sparkContext.parallelize(Seq.empty[Row]),

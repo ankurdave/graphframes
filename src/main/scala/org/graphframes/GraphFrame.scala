@@ -44,7 +44,7 @@ import org.graphframes.pattern._
  */
 class GraphFrame protected(
     @transient val vertices: DataFrame,
-    @transient val edges: DataFrame) extends Logging with Serializable {
+    @transient val edges: DataFrame) extends Serializable {
 
   import GraphFrame._
 
@@ -480,7 +480,11 @@ object GraphFrame extends Serializable {
    * @return  New [[GraphFrame]] instance
    */
   def apply(v: DataFrame, e: DataFrame): GraphFrame = {
-    new GraphFrame(v, e)
+    import org.graphframes.joinelimination.JoinEliminationHelper._
+    registerRules(v.sqlContext)
+    val vK = v.uniqueKey(ID)
+    val eK = e.foreignKey(SRC, vK, ID).foreignKey(DST, vK, ID)
+    new GraphFrame(vK, eK)
   }
 
   /**
@@ -500,18 +504,6 @@ object GraphFrame extends Serializable {
     v.persist(StorageLevel.MEMORY_AND_DISK)
     apply(v, e)
   }
-
-  /*
-  // TODO: Add version with uniqueKey, foreignKey from Ankur's branch?
-  def apply(v: DataFrame, e: DataFrame): GraphFrame = {
-    require(v.columns.contains(ID))
-    require(e.columns.contains(SRC_ID) && e.columns.contains(DST_ID))
-    val vK = v.uniqueKey(ID)
-    vK.registerTempTable("vK")
-    val eK = e.foreignKey("src", "vK." + ID).foreignKey("dst", "vK." + ID)
-    new GraphFrame(vK, eK)
-  }
-  */
 
   /**
    * Converts a GraphX [[Graph]] instance into a [[GraphFrame]].
