@@ -8,14 +8,14 @@ sparkVersion := "2.0.0-SNAPSHOT"
 spName := "graphframes/graphframes"
 
 // Don't forget to set the version
-version := "0.0.1-SNAPSHOT"
+version := "0.1.0-SNAPSHOT"
 
 // All Spark Packages need a license
 licenses := Seq("Apache-2.0" -> url("http://opensource.org/licenses/Apache-2.0"))
 
 
 // Add Spark components this package depends on, e.g, "mllib", ....
-sparkComponents ++= Seq("graphx", "sql", "catalyst")
+sparkComponents ++= Seq("graphx", "sql")
 
 // uncomment and change the value below to change the directory where your zip artifact will be created
 // spDistDirectory := target.value
@@ -32,3 +32,9 @@ unmanagedSourceDirectories in Compile ++=
 
 unmanagedSourceDirectories in Test ++=
   Seq(baseDirectory.value / "src" / "test" / (if (sparkVersion.value.substring(0, 3) == "1.4") "spark-1.4" else "spark-x"))
+
+scalacOptions in (Compile, doc) ++= Seq("-groups", "-implicits")
+
+scalacOptions in (Test, doc) ++= Seq("-groups", "-implicits")
+
+autoAPIMappings := true

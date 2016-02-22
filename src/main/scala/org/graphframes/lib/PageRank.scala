@@ -17,17 +17,16 @@
 
 package org.graphframes.lib
 
-import scala.reflect.runtime.universe._
-
 import org.apache.spark.graphx.{lib => graphxlib}
-
+import org.apache.spark.sql.Row
+import org.apache.spark.sql.types.StringType
 import org.graphframes.GraphFrame
 
 /**
  * PageRank algorithm implementation. There are two implementations of PageRank implemented.
  *
  * The first implementation uses the standalone [[GraphFrame]] interface and runs PageRank
- * for a fixed number of iterations:
+ * for a fixed number of iterations.  This can be run by setting `numIter`.
  * {{{
  * var PR = Array.fill(n)( 1.0 )
  * val oldPR = Array.fill(n)( 1.0 )
@@ -39,8 +38,8 @@ import org.graphframes.GraphFrame
  * }
  * }}}
  *
- * The second implementation uses the [[org.apache.spark.graphx.Pregel]] interface and runs PageRank until
- * convergence:
+ * The second implementation uses the `org.apache.spark.graphx.Pregel interface and runs PageRank
+ * until convergence.  This can be run by setting `tol`.
  *
  * {{{
  * var PR = Array.fill(n)( 1.0 )
@@ -72,9 +71,50 @@ import org.graphframes.GraphFrame
  *  - weight (double): the normalized weight (page rank) of this vertex.
  * All the other columns are dropped.
  */
+class PageRank private[graphframes] (
+      private val graph: GraphFrame) extends Arguments {
+
+  private var tol: Option[Double] = None
+  private var resetProb: Option[Double] = Some(0.15)
+  private var numIters: Option[Int] = None
+  private var srcId : Option[Any] = None
+
+  def sourceId(value : Any): this.type = {
+    this.srcId = Some(value)
+    this
+  }
+
+  def resetProbability(value: Double): this.type = {
+    resetProb = Some(value)
+    this
+  }
+
+  def tol(value: Double): this.type = {
+    tol = Some(value)
+    this
+  }
+
+  def numIter(value: Int): this.type = {
+    numIters = Some(value)
+    this
+  }
+
+  def run(): GraphFrame = {
+    tol match {
+      case Some(t) =>
+        assert(numIters.isEmpty,
+          "You cannot specify numIter() and tol() at the same time.")
+        PageRank.runUntilConvergence(graph, t, resetProb.get, srcId)
+      case None =>
+        PageRank.run(graph, check(numIters, "numIter"), resetProb.get, srcId)
+    }
+  }
+}
+
+
 // TODO: srcID's type should be checked. The most futureproof check would be : Encoder, because it is compatible with
 // Datasets after that.
-object PageRank {
+private object PageRank {
   /**
    * Run PageRank for a fixed number of iterations returning a graph
    * with vertex attributes containing the PageRank and edge
@@ -86,12 +126,13 @@ object PageRank {
    * @return the graph containing with each vertex containing the PageRank and each edge
    *         containing the normalized weight.
    */
-  def run[VertexId : TypeTag](
+  def run(
       graph: GraphFrame,
       numIter: Int,
       resetProb: Double = 0.15,
-      srcId: Option[VertexId] = None): GraphFrame = {
-    val gx = graphxlib.PageRank.runWithOptions(graph.cachedTopologyGraphX, numIter, resetProb, None)
+      srcId: Option[Any] = None): GraphFrame = {
+    val longSrcId = srcId.map(integralId(graph, _))
+    val gx = graphxlib.PageRank.runWithOptions(graph.cachedTopologyGraphX, numIter, resetProb, longSrcId)
     GraphXConversions.fromGraphX(graph, gx, vertexNames = Seq(WEIGHT), edgeNames = Seq(WEIGHT))
   }
 
@@ -106,11 +147,13 @@ object PageRank {
    * @return the graph containing with each vertex containing the PageRank and each edge
    *         containing the normalized weight.
    */
-  def runUntilConvergence[VertexId : TypeTag](
+  def runUntilConvergence(
       graph: GraphFrame,
       tol: Double,
-      resetProb: Double = 0.15, srcId: Option[VertexId] = None): GraphFrame = {
-    val gx = graphxlib.PageRank.runUntilConvergenceWithOptions(graph.cachedTopologyGraphX, tol, resetProb, None)
+      resetProb: Double = 0.15,
+      srcId: Option[Any] = None): GraphFrame = {
+    val longSrcId = srcId.map(integralId(graph, _))
+    val gx = graphxlib.PageRank.runUntilConvergenceWithOptions(graph.cachedTopologyGraphX, tol, resetProb, longSrcId)
     GraphXConversions.fromGraphX(graph, gx, vertexNames = Seq(WEIGHT), edgeNames = Seq(WEIGHT))
   }
 
@@ -120,45 +163,35 @@ object PageRank {
    */
   private val WEIGHT = "weight"
 
-  class Builder private[graphframes] (
-      graph: GraphFrame) extends Arguments {
-
-    private var tol: Option[Double] = None
-    private var resetProb: Option[Double] = Some(0.15)
-    private var numIters: Option[Int] = None
-    private var srcId: Option[Long] = None
-
-    def setSourceId[VertexId : TypeTag](srcId_ : VertexId): this.type = {
-      // TODO(tjh) This should to the conversion to the Long id.
-
-      val t = typeOf[VertexId]
-      require(typeOf[Long] =:= t, s"Only long are supported for now, type was $t")
-      srcId = Some(srcId_.asInstanceOf[Long])
-      this
+  /**
+   * Given a graph and an object, attempts to get the the corresponding integral id in the
+   * internal representation.
+   *
+   * @param graph
+   * @param vertexId
+   * @return
+   */
+  private[graphframes] def integralId(graph: GraphFrame, vertexId: Any): Long = {
+    // Check if we can directly convert it
+    vertexId match {
+      case x: Int => return x.toLong
+      case x: Long => return x.toLong
+      case x: Short => return x.toLong
+      case x: Byte => return x.toLong
+      case _ =>
     }
-
-    def setResetProbability(p: Double): this.type = {
-      resetProb = Some(p)
-      this
+    // It is a non-integral type such as a string, we need to use the translation table.
+    // Check that the type is compatible.
+    val tpe = graph.vertices.schema(GraphFrame.ID)
+    vertexId match {
+      case _: String => require(tpe.dataType == StringType, s"Type should be string, it is ${tpe.dataType}")
+      case x => throw new Exception(s"Unknown type ${x.getClass}. The only accepted types are the raw SQL types")
     }
-
-    def untilConvergence(tolerance: Double): this.type = {
-      tol = Some(tolerance)
-      this
-    }
-
-    def fixedIterations(i: Int): this.type = {
-      numIters = Some(i)
-      this
-    }
-
-    def run(): GraphFrame = {
-      tol match {
-        case Some(t) =>
-          PageRank.runUntilConvergence(graph, t, resetProb.get, srcId)
-        case None =>
-          PageRank.run(graph, check(numIters, "numIters"), resetProb.get, srcId)
-      }
-    }
+    val longIdRow = graph.indexedVertices
+      .select(graph.vertices(GraphFrame.ID) === vertexId)
+      .select(GraphFrame.LONG_ID)
+    // TODO(tjh): could do more informative message
+    val Seq(Row(long_id: Long)) = longIdRow.collect().toSeq
+    long_id
   }
 }

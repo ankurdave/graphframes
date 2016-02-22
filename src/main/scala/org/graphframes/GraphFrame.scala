@@ -17,274 +17,101 @@
 
 package org.graphframes
 
-import scala.reflect.ClassTag
 import scala.reflect.runtime.universe.TypeTag
 
-import org.apache.spark.graphx.{Edge, Graph, TripletFields}
-import org.apache.spark.rdd.RDD
+import org.apache.spark.Logging
+import org.apache.spark.graphx.{Edge, Graph}
 import org.apache.spark.sql.SQLHelpers._
 import org.apache.spark.sql._
 import org.apache.spark.sql.functions.{array, col, count, explode, monotonicallyIncreasingId, struct}
 import org.apache.spark.sql.types._
 import org.apache.spark.storage.StorageLevel
-import org.apache.spark.{Logging, graphx}
 
 import org.graphframes.lib._
 import org.graphframes.pattern._
 
 
 /**
- * Represents a graph with vertices and edges stored as [[DataFrame]]s.
- * [[vertices]] must contain a column named "id" storing unique vertex IDs.
- * [[edges]] must contain two columns "src" and "dst" storing source vertex IDs and destination
- * vertex IDs of edges, respectively.
+ * A representation of a graph using `DataFrame`s.
  *
- * @param vertices the [[DataFrame]] holding vertex information
- * @param edges the [[DataFrame]] holding edge information
+ * @groupname structure Structure information
+ * @groupname conversions Conversions
+ * @groupname stdlib Standard graph algorithms
+ * @groupname degree Graph topology
+ * @groupname motif Motif finding
  */
-class GraphFrame protected(
-    @transient val vertices: DataFrame,
-    @transient val edges: DataFrame) extends Serializable {
+class GraphFrame private(
+    @transient private val _vertices: DataFrame,
+    @transient private val _edges: DataFrame) extends Serializable {
 
   import GraphFrame._
-
-  require(vertices.columns.contains(ID),
-    s"Vertex ID column '$ID' missing from vertex DataFrame, which has columns: "
-      + vertices.columns.mkString(","))
-  require(edges.columns.contains(SRC),
-    s"Source vertex ID column '$SRC' missing from edge DataFrame, which has columns: "
-      + edges.columns.mkString(","))
-  require(edges.columns.contains(DST),
-    s"Destination vertex ID column '$DST' missing from edge DataFrame, which has columns: "
-      + edges.columns.mkString(","))
-
-  private[graphframes] def sqlContext: SQLContext = vertices.sqlContext
 
   /** Default constructor is provided to support serialization */
   protected def this() = this(null, null)
 
-  // ============================ Degree metrics =======================================
-
-  /**
-   * The out-degree of each vertex in the graph, returned as a DataFrame with two columns:
-   * "id" storing vertex IDs and "outDeg" (int) storing out-degrees.
-   * Note that vertices with no out-degrees are not returned in the result.
-   */
-  @transient lazy val outDegrees: DataFrame = {
-    edges.groupBy(edges(SRC).as(ID)).agg(count("*").cast("int").as("outDeg"))
+  override def toString: String = {
+    // We call select on the vertices and edges to ensure that ID, SRC, DST always come first
+    // in the printed schema.
+    val v = vertices.select(ID, vertices.columns.filter(_ != ID) :_ *).toString
+    val e = edges.select(SRC, DST +: edges.columns.filter(c => c != SRC && c != DST) :_ *).toString
+    "GraphFrame(v:" + v + ", e:" + e + ")"
   }
 
-  /**
-   * The in-degree of each vertex in the graph, returned as a DataFame with two columns:
-   * "id" storing vertex IDs and "inDeg" (int) storing out-degrees.
-   * Note that vertices with no in-degrees are not returned in the result.
-   */
-  @transient lazy val inDegrees: DataFrame = {
-    edges.groupBy(edges(DST).as(ID)).agg(count("*").cast("int").as("inDeg"))
-  }
+  // ============== Basic structural methods ============
 
   /**
-   * The degree of each vertex in the graph, returned as a DataFarme with two columns:
-   * "id" storing vertex IDs and "deg" (int) storing degrees.
-   * Note that vertices with no degrees are not returned in the result.
-   */
-  @transient lazy val degrees: DataFrame = {
-    edges.select(explode(array(SRC, DST)).as(ID)).groupBy(ID).agg(count("*").cast("int").as("deg"))
-  }
-
-  /**
-   * A cached conversion of this graph to the GraphX structure. All the data is stripped away.
-   */
-  @transient lazy private[graphframes] val cachedTopologyGraphX: Graph[Unit, Unit] = {
-    cachedGraphX.mapVertices((_, _) => ()).mapEdges(e => ())
-  }
-
-  /**
-   * A cached conversion of this graph to the GraphX structure, with the data stored for each edge and vertex.
-   */
-  @transient private lazy val cachedGraphX: Graph[Row, Row] = { toGraphX }
-
-  // ============================ Motif finding ========================================
-
-
-  /**
-   * Motif finding.
-   * TODO: Describe possible motifs.
+   * The dataframe representation of the vertices of the graph.
    *
-   * @param pattern  Pattern specifying a motif to search for.
-   * @return  [[DataFrame]] containing all instances of the motif.
-   *          TODO: Describe column naming patterns.
-   */
-  def find(pattern: String): DataFrame =
-    findSimple(Nil, None, Pattern.parse(pattern))
-
-  /**
-   * Primary method implementing motif finding.
-   * This recursive method handles one pattern (via [[findIncremental()]] on each iteration,
-   * augmenting the [[DataFrame]] in prevDF with each new pattern.
+   * It contains a column called [[GraphFrame.ID]] with the id of the vertex,
+   * and various other user-defined attributes with other attributes.
    *
-   * @param prevPatterns  Patterns already handled
-   * @param prevDF  Current DataFrame based on prevPatterns
-   * @param remainingPatterns  Patterns not yet handled
-   * @return  [[DataFrame]] augmented with the next pattern, or the previous DataFrame if done
+   * The order of the columns is available in [[vertexColumns]].
+   *
+   * @group structure
    */
-  private def findSimple(
-      prevPatterns: Seq[Pattern],
-      prevDF: Option[DataFrame],
-      remainingPatterns: Seq[Pattern]): DataFrame = {
-    remainingPatterns match {
-      case Nil => prevDF.getOrElse(sqlContext.emptyDataFrame)
-      case cur :: rest =>
-        val df = findIncremental(prevPatterns, prevDF, cur)
-        findSimple(prevPatterns :+ cur, df, rest)
+  def vertices: DataFrame = {
+    if (_vertices == null) {
+      throw new Exception("You cannot use GraphFrame objects within a Spark closure")
     }
-  }
-
-  // Helper methods defining column naming conventions for motif finding
-  private def prefixWithName(name: String, col: String): String = name + "." + col
-  private def vId(name: String): String = prefixWithName(name, ID)
-  private def eSrcId(name: String): String = prefixWithName(name, SRC)
-  private def eDstId(name: String): String = prefixWithName(name, DST)
-  private def nestE(name: String): DataFrame = edges.select(nestAsCol(edges, name))
-  private def nestV(name: String): DataFrame = vertices.select(nestAsCol(vertices, name))
-
-  private def maybeJoin(aOpt: Option[DataFrame], b: DataFrame): DataFrame = {
-    aOpt match {
-      case Some(a) => a.join(b)
-      case None => b
-    }
-  }
-
-  private def maybeJoin(
-      aOpt: Option[DataFrame],
-      b: DataFrame,
-      joinExprs: DataFrame => Column): DataFrame = {
-    aOpt match {
-      case Some(a) => a.join(b, joinExprs(a))
-      case None => b
-    }
-  }
-
-  /** Indicate whether a named vertex has been seen in any of the given patterns */
-  private def seen(v: NamedVertex, patterns: Seq[Pattern]) = patterns.exists(p => seen1(v, p))
-
-  /** Indicate whether a named vertex has been seen in the given pattern */
-  private def seen1(v: NamedVertex, pattern: Pattern): Boolean = pattern match {
-    case Negation(edge) =>
-      seen1(v, edge)
-    case AnonymousEdge(src, dst) =>
-      seen1(v, src) || seen1(v, dst)
-    case NamedEdge(_, src, dst) =>
-      seen1(v, src) || seen1(v, dst)
-    case v2 @ NamedVertex(_) =>
-      v2 == v
-    case AnonymousVertex =>
-      false
+    _vertices
   }
 
   /**
-   * Augment the given DataFrame based on a pattern.
+   * The dataframe representation of the edges of the graph.
    *
-   * @param prevPatterns  Patterns which have contributed to the given DataFrame
-   * @param prev  Given DataFrame
-   * @param pattern  Pattern to search for
-   * @return  DataFrame augmented with the current search pattern
+   * It contains two columns called [[GraphFrame.SRC]] and [[GraphFrame.DST]] that contain
+   * the ids of the source vertex and the destination vertex of each edge, respectively.
+   * It may also contain various other columns with user-defined attributes for each edge.
+   *
+   * For symmetric graphs, both pairs src -> dst and dst -> src are present with the same
+   * attributes for each pair.
+   *
+   * The order of the columns is available in [[edgeColumns]].
+   *
+   * @group structure
    */
-  private def findIncremental(
-      prevPatterns: Seq[Pattern],
-      prev: Option[DataFrame],
-      pattern: Pattern): Option[DataFrame] = pattern match {
-
-    case AnonymousVertex =>
-      prev
-
-    case v @ NamedVertex(name) =>
-      if (seen(v, prevPatterns)) {
-        for (prev <- prev) assert(prev.columns.toSet.contains(name))
-        prev
-      } else {
-        Some(maybeJoin(prev, nestV(name)))
-      }
-
-    case NamedEdge(name, AnonymousVertex, AnonymousVertex) =>
-      val eRen = nestE(name)
-      Some(maybeJoin(prev, eRen))
-
-    case NamedEdge(name, AnonymousVertex, dst @ NamedVertex(dstName)) =>
-      if (seen(dst, prevPatterns)) {
-        val eRen = nestE(name)
-        Some(maybeJoin(prev, eRen, prev => eRen(eDstId(name)) === prev(vId(dstName))))
-      } else {
-        val eRen = nestE(name)
-        val dstV = nestV(dstName)
-        Some(maybeJoin(prev, eRen)
-          .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName)), "left_outer"))
-      }
-
-    case NamedEdge(name, src @ NamedVertex(srcName), AnonymousVertex) =>
-      if (seen(src, prevPatterns)) {
-        val eRen = nestE(name)
-        Some(maybeJoin(prev, eRen, prev => eRen(eSrcId(name)) === prev(vId(srcName))))
-      } else {
-        val eRen = nestE(name)
-        val srcV = nestV(srcName)
-        Some(maybeJoin(prev, eRen)
-          .join(srcV, eRen(eSrcId(name)) === srcV(vId(srcName))))
-      }
-
-    case NamedEdge(name, src @ NamedVertex(srcName), dst @ NamedVertex(dstName)) =>
-      (seen(src, prevPatterns), seen(dst, prevPatterns)) match {
-        case (true, true) =>
-          val eRen = nestE(name)
-          Some(maybeJoin(prev, eRen, prev =>
-            eRen(eSrcId(name)) === prev(vId(srcName)) && eRen(eDstId(name)) === prev(vId(dstName))))
-
-        case (true, false) =>
-          val eRen = nestE(name)
-          val dstV = nestV(dstName)
-          Some(maybeJoin(prev, eRen, prev => eRen(eSrcId(name)) === prev(vId(srcName)))
-            .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName))))
-
-        case (false, true) =>
-          val eRen = nestE(name)
-          val srcV = nestV(srcName)
-          Some(maybeJoin(prev, eRen, prev => eRen(eDstId(name)) === prev(vId(dstName)))
-            .join(srcV, eRen(eSrcId(name)) === srcV(vId(srcName))))
-
-        case (false, false) =>
-          val eRen = nestE(name)
-          val srcV = nestV(srcName)
-          val dstV = nestV(dstName)
-          Some(maybeJoin(prev, eRen)
-            .join(srcV, eRen(eSrcId(name)) === srcV(vId(srcName)))
-            .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName))))
-        // TODO: expose the plans from joining these in the opposite order
-      }
-
-    case AnonymousEdge(src, dst) =>
-      val tmpName = "__tmp"
-      val result = findIncremental(prevPatterns, prev, NamedEdge(tmpName, src, dst))
-      result.map(_.drop(tmpName))
-
-    case Negation(edge) => prev match {
-      case Some(p) => findIncremental(prevPatterns, Some(p), edge).map(result => p.except(result))
-      case None => throw new InvalidPatternException
+  // TODO(tjhunter) eventually clarify the treatment of duplicate edges
+  def edges: DataFrame = {
+    if (_edges == null) {
+      throw new Exception("You cannot use GraphFrame objects within a Spark closure")
     }
+    _edges
   }
 
-  // ======================== Other queries ===================================
-
-  /** Breadth-first search (BFS) */
-  def bfs(fromExpr: Column, toExpr: Column): BFS.Builder = new BFS.Builder(this, fromExpr, toExpr)
-
-  /** Breadth-first search (BFS) */
-  def bfs(fromExpr: String, toExpr: String): BFS.Builder =
-    new BFS.Builder(this, expr(fromExpr), expr(toExpr))
+  /**
+   * Returns triplets: (source vertex)-[edge]->(destination vertex) for all edges in the graph.
+   * The DataFrame returned has 3 columns, with names: [[GraphFrame.SRC]], [[GraphFrame.EDGE]],
+   * and [[GraphFrame.DST]].  The 2 vertex columns have schema matching [[GraphFrame.vertices]],
+   * and the edge column has a schema matching [[GraphFrame.edges]].
+   *
+   * @group structure
+   */
+  lazy val triplets: DataFrame = find(s"($SRC)-[$EDGE]->($DST)")
 
   // ============================ Conversions ========================================
 
   /**
-   * Converts this [[GraphFrame]] instance to a GraphX [[Graph]].
+   * Converts this [[GraphFrame]] instance to a GraphX `Graph`.
    * Vertex and edge attributes are the original rows in [[vertices]] and [[edges]], respectively.
    *
    * Note that vertex (and edge) attributes include vertex IDs (and source, destination IDs)
@@ -292,8 +119,10 @@ class GraphFrame protected(
    * then the values are indexed in order to generate corresponding Long vertex IDs (which is an
    * expensive operation).
    *
-   * The column ordering of the returned [[Graph]] vertex and edge attributes are specified by
-   * [[vCols]] and [[eCols]], respectively.
+   * The column ordering of the returned `Graph` vertex and edge attributes are specified by
+   * [[vertexColumns]] and [[edgeColumns]], respectively.
+   *
+   * @group conversions
    */
   def toGraphX: Graph[Row, Row] = {
     if (hasIntegralIdType) {
@@ -311,6 +140,223 @@ class GraphFrame protected(
       Graph(vv, ee)
     }
   }
+
+  /**
+   * The column names in the [[vertices]] DataFrame, in order.
+   *
+   * Helper method for [[toGraphX]] which specifies the schema of vertex attributes.
+   * The vertex attributes of the returned `Graph` are given as a `Row`,
+   * and this method defines the column ordering in that `Row`.
+   *
+   * @group conversions
+   */
+  def vertexColumns: Array[String] = vertices.columns
+
+  /**
+   * Version of [[vertexColumns]] which maps column names to indices in the Rows.
+   *
+   * @group conversions
+   */
+  def vertexColumnMap: Map[String, Int] = vertexColumns.zipWithIndex.toMap
+
+  /**
+   * The vertex names in the [[vertices]] DataFrame, in order.
+   *
+   * Helper method for [[toGraphX]] which specifies the schema of edge attributes.
+   * The edge attributes of the returned `edges` are given as a `Row`,
+   * and this method defines the column ordering in that `Row`.
+   *
+   * @group conversions
+   */
+  def edgeColumns: Array[String] = edges.columns
+
+  /**
+   * Version of [[edgeColumns]] which maps column names to indices in the Rows.
+   *
+   * @group conversions
+   */
+  def edgeColumnMap: Map[String, Int] = edgeColumns.zipWithIndex.toMap
+
+  // ============================ Degree metrics =======================================
+
+  /**
+   * The out-degree of each vertex in the graph, returned as a DataFrame with two columns:
+   *  - [[GraphFrame.ID]] the ID of the vertex
+   *  - "outDegree" (integer) storing the out-degree of the vertex
+   * Note that vertices with 0 out-edges are not returned in the result.
+   *
+   * @group degree
+   */
+  @transient lazy val outDegrees: DataFrame = {
+    edges.groupBy(edges(SRC).as(ID)).agg(count("*").cast("int").as("outDegree"))
+  }
+
+  /**
+   * The in-degree of each vertex in the graph, returned as a DataFame with two columns:
+   *  - [[GraphFrame.ID]] the ID of the vertex
+   * "- "inDegree" (int) storing the in-degree of the vertex
+   * Note that vertices with 0 in-edges are not returned in the result.
+   *
+   * @group degree
+   */
+  @transient lazy val inDegrees: DataFrame = {
+    edges.groupBy(edges(DST).as(ID)).agg(count("*").cast("int").as("inDegree"))
+  }
+
+  /**
+   * The degree of each vertex in the graph, returned as a DataFrame with two columns:
+   *  - [[GraphFrame.ID]] the ID of the vertex
+   *  - 'degree' (integer) the degree of the vertex
+   * Note that vertices with 0 edges are not returned in the result.
+   *
+   * @group degree
+   */
+  @transient lazy val degrees: DataFrame = {
+    edges.select(explode(array(SRC, DST)).as(ID)).groupBy(ID).agg(count("*").cast("int").as("degree"))
+  }
+
+  // ============================ Motif finding ========================================
+
+  /**
+   * Motif finding.
+   * TODO: Describe possible motifs.
+   *
+   * @param pattern  Pattern specifying a motif to search for.
+   * @return  `DataFrame` containing all instances of the motif.
+   *          TODO: Describe column naming patterns.
+   *
+   * @group motif
+   */
+  def find(pattern: String): DataFrame =
+    findSimple(Nil, None, Pattern.parse(pattern))
+
+
+  // ======================== Other queries ===================================
+
+  /**
+   * Breadth-first search (BFS)
+   *
+   * Refer to the documentation of [[org.graphframes.lib.BFS]] for the description of the output.
+   *
+   * @group stdlib
+   */
+  def bfs(fromExpr: Column, toExpr: Column): BFS = new BFS(this, fromExpr, toExpr)
+
+  /**
+   * Breadth-first search (BFS)
+   *
+   * Refer to the documentation of [[org.graphframes.lib.BFS]] for the description of the output.
+   *
+   * @param fromExpr a SQL expression that selects all the source nodes.
+   * @param toExpr a SQL expression that selects all the sink nodes.
+   *
+   * @group stdlib
+   */
+  def bfs(fromExpr: String, toExpr: String): BFS =
+    new BFS(this, expr(fromExpr), expr(toExpr))
+
+  /**
+   * This is a primitive for implementing graph algorithms.
+   * This method aggregates values from the neighboring edges and vertices of each vertex.
+   * See [[org.graphframes.lib.AggregateMessages AggregateMessages]] for detailed documentation.
+   */
+  def aggregateMessages: AggregateMessages = new AggregateMessages(this)
+
+
+  // **** Standard library ****
+
+  /**
+   * Connected component algorithm.
+   *
+   * See [[org.graphframes.lib.ConnectedComponents]] for more details.
+   *
+   * @group stdlib
+   */
+  def connectedComponents: ConnectedComponents = new ConnectedComponents(this)
+
+  /**
+   * Label propagation algorithm.
+   *
+   * See [[org.graphframes.lib.LabelPropagation]] for more details.
+   *
+   * @group stdlib
+   */
+  def labelPropagation: LabelPropagation = new LabelPropagation(this)
+
+  /**
+   * PageRank algorithm.
+   *
+   * See [[org.graphframes.lib.PageRank]] for more details.
+   *
+   * @group stdlib
+   */
+  def pageRank: PageRank = new PageRank(this)
+
+  /**
+   * Shortest paths algorithm.
+   *
+   * See [[org.graphframes.lib.ShortestPaths]] for more details.
+   *
+   * @group stdlib
+   */
+  def shortestPaths: ShortestPaths = new ShortestPaths(this)
+
+  /**
+   * Strongly connected components algorithm.
+   *
+   * See [[org.graphframes.lib.StronglyConnectedComponents]] for more details.
+   *
+   * @group stdlib
+   */
+  def stronglyConnectedComponents: StronglyConnectedComponents =
+    new StronglyConnectedComponents(this)
+
+  /**
+   * SVD++ algorithm.
+   *
+   * See [[org.graphframes.lib.SVDPlusPlus]] for more details.
+   *
+   * @group stdlib
+   */
+  def svdPlusPlus: SVDPlusPlus = new SVDPlusPlus(this)
+
+  /**
+   * Triangle count algorithm.
+   *
+   * See [[org.graphframes.lib.TriangleCount]] for more details.
+   *
+   * @group stdlib
+   */
+  def triangleCount: TriangleCount = new TriangleCount(this)
+  
+  // ========= Motif finding (private) =========
+
+
+  /**
+   * Primary method implementing motif finding.
+   * This recursive method handles one pattern (via [[findIncremental()]] on each iteration,
+   * augmenting the `DataFrame` in prevDF with each new pattern.
+   *
+   * @param prevPatterns  Patterns already handled
+   * @param prevDF  Current DataFrame based on prevPatterns
+   * @param remainingPatterns  Patterns not yet handled
+   * @return  `DataFrame` augmented with the next pattern, or the previous DataFrame if done
+   */
+  private def findSimple(
+      prevPatterns: Seq[Pattern],
+      prevDF: Option[DataFrame],
+      remainingPatterns: Seq[Pattern]): DataFrame = {
+    remainingPatterns match {
+      case Nil => prevDF.getOrElse(sqlContext.emptyDataFrame)
+      case cur :: rest =>
+        val df = findIncremental(this, prevPatterns, prevDF, cur)
+        findSimple(prevPatterns :+ cur, df, rest)
+    }
+  }
+
+  // ========= Other private methods ===========
+
+  private[graphframes] def sqlContext: SQLContext = vertices.sqlContext
 
   /**
    * True if the id type can be cast to Long.
@@ -361,87 +407,17 @@ class GraphFrame protected(
   }
 
   /**
-   * Helper method for [[toGraphX]] which specifies the schema of vertex attributes.
-   * The vertex attributes of the returned [[Graph.vertices]] are given as a [[Row]],
-   * and this method defines the column ordering in that [[Row]].
+   * A cached conversion of this graph to the GraphX structure. All the data is stripped away.
    */
-  lazy val vCols: Array[String] = vertices.columns
-
-  /**
-   * Version of [[vCols]] which maps column names to indices in the Rows.
-   */
-  lazy val vColsMap: Map[String, Int] = vCols.zipWithIndex.toMap
-
-  /**
-   * Helper method for [[toGraphX]] which specifies the schema of edge attributes.
-   * The edge attributes of the returned [[Graph.edges]] are given as a [[Row]],
-   * and this method defines the column ordering in that [[Row]].
-   */
-  lazy val eCols: Array[String] = edges.columns
-
-  /**
-   * Version of [[eCols]] which maps column names to indices in the Rows.
-   */
-  lazy val eColsMap: Map[String, Int] = eCols.zipWithIndex.toMap
-
-  /**
-   *
-   * Aggregates values from the neighboring edges and vertices of each vertex. The user-supplied
-   * `sendMsg` function is invoked on each edge of the graph, generating 0 or more messages to be
-   * sent to either vertex in the edge. The `mergeMsg` function is then used to combine all messages
-   * destined to the same vertex.
-   *
-   * @tparam A the type of message to be sent to each vertex
-   * @param sendMsg runs on each edge, sending messages to neighboring vertices using the
-   *   [[EdgeContext]].
-   *   The first iterable collection is the collection of messages sent to the SOURCE.
-   *   The second iterable collection is the collection of messages sent to the DESTINATION.
-   * @param aggregate used to combine messages from `sendMsg` destined to the same vertex. This
-   *   combiner should be commutative and associative.
-   * @param selectedFields which fields should be included in the [[EdgeContext]] passed to the
-   *   `sendMsg` function. If not all fields are needed, specifying this can improve performance.
-   * @example We can use this function to compute the in-degree of each
-   * vertex
-   * {{{
-   * val rawGraph: Graph[_, _] = Graph.textFile("twittergraph")
-   * val inDeg: RDD[(VertexId, Int)] =
-   *   rawGraph.aggregateMessages(ctx => Seq(1) -> Seq.empty, _ + _)
-   * }}}
-   *
-   * It returns a dataframe with the following columns:
-   *  - id: the vertex ID
-   *  - all the other columns that were created by using type A.
-   */
-  def aggregateMessages[A : ClassTag : TypeTag](
-      sendMsg: EdgeContext => (Iterable[A], Iterable[A]),
-      aggregate: (A, A) => A,
-      selectedFields: TripletFields = TripletFields.All): DataFrame = {
-    def send(ec: graphx.EdgeContext[Row, Row, A]): Unit = {
-      val ec2: EdgeContext = new EdgeContextImpl(ec.srcId, ec.dstId, ec.srcAttr, ec.dstAttr, ec.attr)
-      val (src, dst) = sendMsg(ec2)
-      src.foreach(ec.sendToSrc)
-      dst.foreach(ec.sendToDst)
-    }
-    val gx: RDD[(Long, A)] = cachedGraphX.aggregateMessages(send, aggregate, selectedFields)
-    val df = sqlContext.createDataFrame(gx).toDF(ID, ATTR)
-    df
+  @transient lazy private[graphframes] val cachedTopologyGraphX: Graph[Unit, Unit] = {
+    cachedGraphX.mapVertices((_, _) => ()).mapEdges(e => ())
   }
 
-  // **** Standard library ****
+  /**
+   * A cached conversion of this graph to the GraphX structure, with the data stored for each edge and vertex.
+   */
+  @transient private lazy val cachedGraphX: Graph[Row, Row] = { toGraphX }
 
-  def connectedComponents(): ConnectedComponents.Builder = new ConnectedComponents.Builder(this)
-
-  def labelPropagation(): LabelPropagation.Builder = new LabelPropagation.Builder(this)
-
-  def pageRank(): PageRank.Builder = new PageRank.Builder(this)
-
-  def shortestPaths(): ShortestPaths.Builder = new ShortestPaths.Builder(this)
-
-  def stronglyConnectedComponents(): StronglyConnectedComponents.Builder = new StronglyConnectedComponents.Builder(this)
-
-  def svdPlusPlus(): SVDPlusPlus.Builder = new SVDPlusPlus.Builder(this)
-
-  def triangleCount(): TriangleCount.Builder = new TriangleCount.Builder(this)
 }
 
 
@@ -450,49 +426,63 @@ object GraphFrame extends Serializable {
   /** Column name for vertex IDs in [[GraphFrame.vertices]] */
   val ID: String = "id"
 
-  /** Column name for source vertex IDs in [[GraphFrame.edges]] */
+  /**
+   * Column name for source vertices of edges.
+   *  - In [[GraphFrame.edges]], this is a column of vertex IDs.
+   *  - In [[GraphFrame.triplets]], this is a column of vertices with schema matching
+   *    [[GraphFrame.vertices]].
+   */
   val SRC: String = "src"
 
-  /** Column name for destination vertex IDs in [[GraphFrame.edges]] */
+  /**
+   * Column name for destination vertices of edges.
+   *  - In [[GraphFrame.edges]], this is a column of vertex IDs.
+   *  - In [[GraphFrame.triplets]], this is a column of vertices with schema matching
+   *    [[GraphFrame.vertices]].
+   */
   val DST: String = "dst"
 
-  /** Default name for attribute columns when converting from GraphX [[Graph]] format */
-  private[graphframes] val ATTR: String = "attr"
-
   /**
-   * The integral id that is used as a surrogate id when using graphX implementation
+   * Column name for edge in [[GraphFrame.triplets]].  In [[GraphFrame.triplets]],
+   * this is a column of edges with schema matching [[GraphFrame.edges]].
    */
-  private[graphframes] val LONG_ID: String = "new_id"
-
-  private[graphframes] val LONG_SRC: String = "new_src"
-  private[graphframes] val LONG_DST: String = "new_dst"
-  private[graphframes] val GX_ATTR: String = "graphx_attr"
+  val EDGE: String = "edge"
 
   // ============================ Constructors and converters =================================
 
   /**
-   * Create a new [[GraphFrame]] from vertex and edge [[DataFrame]]s.
+   * Create a new [[GraphFrame]] from vertex and edge `DataFrame`s.
    *
-   * @param v  Vertex DataFrame.  This must include a column "id" containing unique vertex IDs.
+   * @param vertices  Vertex DataFrame.  This must include a column "id" containing unique vertex IDs.
    *           All other columns are treated as vertex attributes.
-   * @param e  Edge DataFrame.  This must include columns "src" and "dst" containing source and
+   * @param edges  Edge DataFrame.  This must include columns "src" and "dst" containing source and
    *           destination vertex IDs.  All other columns are treated as edge attributes.
    * @return  New [[GraphFrame]] instance
    */
-  def apply(v: DataFrame, e: DataFrame): GraphFrame = {
+  def apply(vertices: DataFrame, edges: DataFrame): GraphFrame = {
+    require(vertices.columns.contains(ID),
+      s"Vertex ID column '$ID' missing from vertex DataFrame, which has columns: "
+        + vertices.columns.mkString(","))
+    require(edges.columns.contains(SRC),
+      s"Source vertex ID column '$SRC' missing from edge DataFrame, which has columns: "
+        + edges.columns.mkString(","))
+    require(edges.columns.contains(DST),
+      s"Destination vertex ID column '$DST' missing from edge DataFrame, which has columns: "
+        + edges.columns.mkString(","))
+
     import org.graphframes.joinelimination.JoinEliminationHelper._
-    registerRules(v.sqlContext)
-    val vK = v.uniqueKey(ID)
-    val eK = e.foreignKey(SRC, vK, ID).foreignKey(DST, vK, ID)
+    registerRules(vertices.sqlContext)
+    val vK = vertices.uniqueKey(ID)
+    val eK = edges.foreignKey(SRC, vK, ID).foreignKey(DST, vK, ID)
     new GraphFrame(vK, eK)
   }
 
   /**
-   * Create a new [[GraphFrame]] from an edge [[DataFrame]].
+   * Create a new [[GraphFrame]] from an edge `DataFrame`.
    * The resulting [[GraphFrame]] will have [[GraphFrame.vertices]] with a single "id" column.
    *
    * Note: The [[GraphFrame.vertices]] DataFrame will be persisted at level
-   *       [[StorageLevel.MEMORY_AND_DISK]].
+   *       `StorageLevel.MEMORY_AND_DISK`.
    * @param e  Edge DataFrame.  This must include columns "src" and "dst" containing source and
    *           destination vertex IDs.  All other columns are treated as edge attributes.
    * @return  New [[GraphFrame]] instance
@@ -506,9 +496,9 @@ object GraphFrame extends Serializable {
   }
 
   /**
-   * Converts a GraphX [[Graph]] instance into a [[GraphFrame]].
+   * Converts a GraphX `Graph` instance into a [[GraphFrame]].
    *
-   * This converts each [[org.apache.spark.rdd.RDD]] in the [[Graph]] to a [[DataFrame]] using
+   * This converts each `org.apache.spark.rdd.RDD` in the `Graph` to a `DataFrame` using
    * schema inference.
    * TODO: Add version which takes explicit schemas.
    *
@@ -521,6 +511,240 @@ object GraphFrame extends Serializable {
     val ee = sqlContext.createDataFrame(graph.edges).toDF(SRC, DST, ATTR)
     GraphFrame(vv, ee)
   }
+
+
+  /**
+   * Given:
+   *  - a GraphFrame `originalGraph`
+   *  - a GraphX graph derived from the GraphFrame using [[GraphFrame.toGraphX]]
+   * this method merges attributes from the GraphX graph into the original GraphFrame.
+   *
+   * This method is useful for doing computations using the GraphX API and then merging the results
+   * with a GraphFrame.  For example, given:
+   *  - GraphFrame `originalGraph`
+   *  - GraphX Graph[String, Int] `graph` with a String vertex attribute we want to call "category"
+   *    and an Int edge attribute we want to call "count"
+   * We can call `fromGraphX(originalGraph, graph, Seq("category"), Seq("count"))` to produce
+   * a new GraphFrame. The new GraphFrame will be an augmented version of `originalGraph`,
+   * with new [[GraphFrame.vertices]] column "category" and new [[GraphFrame.edges]] column
+   * "count" added.
+   *
+   * See [[org.graphframes.examples.BeliefPropagation]] for example usage.
+   *
+   * @param originalGraph  Original GraphFrame used to compute the GraphX graph.
+   * @param graph  GraphX graph. Vertex and edge attributes, if any, will be merged into
+   *               the original graph as new columns.  If the attributes are `Product` types
+   *               such as tuples, then each element of the `Product` will be put in a separate
+   *               column.  If the attributes are other types, then the entire GraphX attribute
+   *               will become a single new column.
+   * @param vertexNames  Column name(s) for vertex attributes in the GraphX graph.
+   *                     If there is no vertex attribute, this should be empty.
+   *                     If there is a singleton attribute, this should have a single column name.
+   *                     If the attribute is a `Product` type, this should be a list of names
+   *                     matching the order of the attribute elements.
+   * @param edgeNames  Column name(s) for edge attributes in the GraphX graph.
+   *                     If there is no edge attribute, this should be empty.
+   *                     If there is a singleton attribute, this should have a single column name.
+   *                     If the attribute is a `Product` type, this should be a list of names
+   *                     matching the order of the attribute elements.
+   * @tparam V the type of the vertex data
+   * @tparam E the type of the edge data
+   * @return original graph augmented with vertex and column attributes from the GraphX graph
+   */
+  def fromGraphX[V : TypeTag, E : TypeTag](
+      originalGraph: GraphFrame,
+      graph: Graph[V, E],
+      vertexNames: Seq[String] = Nil,
+      edgeNames: Seq[String] = Nil): GraphFrame = {
+    GraphXConversions.fromGraphX[V, E](originalGraph, graph, vertexNames, edgeNames)
+  }
+
+
+  // ============== Private constants ==============
+
+  /** Default name for attribute columns when converting from GraphX [[Graph]] format */
+  private[graphframes] val ATTR: String = "attr"
+
+  /**
+   * The integral id that is used as a surrogate id when using graphX implementation
+   */
+  private[graphframes] val LONG_ID: String = "new_id"
+
+  private[graphframes] val LONG_SRC: String = "new_src"
+  private[graphframes] val LONG_DST: String = "new_dst"
+  private[graphframes] val GX_ATTR: String = "graphx_attr"
+
+
+
+  /** Helper for using [col].* in Spark 1.4.  Returns sequence of [col].[field] for all fields */
+  private[graphframes] def colStar(df: DataFrame, col: String): Seq[String] = {
+    df.schema(col).dataType match {
+      case s: StructType =>
+        s.fieldNames.map(f => col + "." + f)
+      case other =>
+        throw new RuntimeException(s"Unknown error in GraphFrame. Expected column $col to be" +
+          s" StructType, but found type: $other")
+    }
+  }
+
+  /** Nest all columns within a single StructType column with the given name */
+  private[graphframes] def nestAsCol(df: DataFrame, name: String): Column = {
+    struct(df.columns.map(c => df(c)) :_*).as(name)
+  }
+
+  // ========== Motif finding ==========
+
+  private def prefixWithName(name: String, col: String): String = name + "." + col
+  private def vId(name: String): String = prefixWithName(name, ID)
+  private def eSrcId(name: String): String = prefixWithName(name, SRC)
+  private def eDstId(name: String): String = prefixWithName(name, DST)
+
+
+  private def maybeJoin(aOpt: Option[DataFrame], b: DataFrame): DataFrame = {
+    aOpt match {
+      case Some(a) => a.join(b)
+      case None => b
+    }
+  }
+
+  private def maybeJoin(
+      aOpt: Option[DataFrame],
+      b: DataFrame,
+      joinExprs: DataFrame => Column): DataFrame = {
+    aOpt match {
+      case Some(a) => a.join(b, joinExprs(a))
+      case None => b
+    }
+  }
+
+
+  /** Indicate whether a named vertex has been seen in any of the given patterns */
+  private def seen(v: NamedVertex, patterns: Seq[Pattern]) = patterns.exists(p => seen1(v, p))
+
+  /** Indicate whether a named vertex has been seen in the given pattern */
+  private def seen1(v: NamedVertex, pattern: Pattern): Boolean = pattern match {
+    case Negation(edge) =>
+      seen1(v, edge)
+    case AnonymousEdge(src, dst) =>
+      seen1(v, src) || seen1(v, dst)
+    case NamedEdge(_, src, dst) =>
+      seen1(v, src) || seen1(v, dst)
+    case v2 @ NamedVertex(_) =>
+      v2 == v
+    case AnonymousVertex =>
+      false
+  }
+
+
+  /**
+   * Augment the given DataFrame based on a pattern.
+   *
+   * @param prevPatterns  Patterns which have contributed to the given DataFrame
+   * @param prev  Given DataFrame
+   * @param pattern  Pattern to search for
+   * @return  DataFrame augmented with the current search pattern
+   */
+  private def findIncremental(
+      gf: GraphFrame,
+      prevPatterns: Seq[Pattern],
+      prev: Option[DataFrame],
+      pattern: Pattern): Option[DataFrame] = {
+    def nestE(name: String): DataFrame = gf.edges.select(nestAsCol(gf.edges, name))
+    def nestV(name: String): DataFrame = gf.vertices.select(nestAsCol(gf.vertices, name))
+
+    pattern match {
+
+      case AnonymousVertex =>
+        prev
+
+      case v @ NamedVertex(name) =>
+        if (seen(v, prevPatterns)) {
+          for (prev <- prev) assert(prev.columns.toSet.contains(name))
+          prev
+        } else {
+          Some(maybeJoin(prev, nestV(name)))
+        }
+
+      case NamedEdge(name, AnonymousVertex, AnonymousVertex) =>
+        val eRen = nestE(name)
+        Some(maybeJoin(prev, eRen))
+
+      case NamedEdge(name, AnonymousVertex, dst @ NamedVertex(dstName)) =>
+        if (seen(dst, prevPatterns)) {
+          val eRen = nestE(name)
+          Some(maybeJoin(prev, eRen, prev => eRen(eDstId(name)) === prev(vId(dstName))))
+        } else {
+          val eRen = nestE(name)
+          val dstV = nestV(dstName)
+          Some(maybeJoin(prev, eRen)
+            .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName)), "left_outer"))
+        }
+
+      case NamedEdge(name, src @ NamedVertex(srcName), AnonymousVertex) =>
+        if (seen(src, prevPatterns)) {
+          val eRen = nestE(name)
+          Some(maybeJoin(prev, eRen, prev => eRen(eSrcId(name)) === prev(vId(srcName))))
+        } else {
+          val eRen = nestE(name)
+          val srcV = nestV(srcName)
+          Some(maybeJoin(prev, eRen)
+            .join(srcV, eRen(eSrcId(name)) === srcV(vId(srcName))))
+        }
+
+      case NamedEdge(name, src @ NamedVertex(srcName), dst @ NamedVertex(dstName)) =>
+        (seen(src, prevPatterns), seen(dst, prevPatterns)) match {
+          case (true, true) =>
+            val eRen = nestE(name)
+            Some(maybeJoin(prev, eRen, prev =>
+              eRen(eSrcId(name)) === prev(vId(srcName)) && eRen(eDstId(name)) === prev(vId(dstName))))
+
+          case (true, false) =>
+            val eRen = nestE(name)
+            val dstV = nestV(dstName)
+            Some(maybeJoin(prev, eRen, prev => eRen(eSrcId(name)) === prev(vId(srcName)))
+              .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName))))
+
+          case (false, true) =>
+            val eRen = nestE(name)
+            val srcV = nestV(srcName)
+            Some(maybeJoin(prev, eRen, prev => eRen(eDstId(name)) === prev(vId(dstName)))
+              .join(srcV, eRen(eSrcId(name)) === srcV(vId(srcName))))
+
+          case (false, false) =>
+            val eRen = nestE(name)
+            val srcV = nestV(srcName)
+            val dstV = nestV(dstName)
+            Some(maybeJoin(prev, eRen)
+              .join(srcV, eRen(eSrcId(name)) === srcV(vId(srcName)))
+              .join(dstV, eRen(eDstId(name)) === dstV(vId(dstName))))
+          // TODO: expose the plans from joining these in the opposite order
+        }
+
+      case AnonymousEdge(src, dst) =>
+        val tmpName = "__tmp"
+        val result = findIncremental(gf, prevPatterns, prev, NamedEdge(tmpName, src, dst))
+        result.map(_.drop(tmpName))
+
+      case Negation(edge) => prev match {
+        case Some(p) => findIncremental(gf, prevPatterns, Some(p), edge).map(result => p.except(result))
+        case None => throw new InvalidPatternException
+      }
+    }
+  }
+
+
+  /*
+  // TODO: Add version with uniqueKey, foreignKey from Ankur's branch?
+  def apply(v: DataFrame, e: DataFrame): GraphFrame = {
+    require(v.columns.contains(ID))
+    require(e.columns.contains(SRC_ID) && e.columns.contains(DST_ID))
+    val vK = v.uniqueKey(ID)
+    vK.registerTempTable("vK")
+    val eK = e.foreignKey("src", "vK." + ID).foreignKey("dst", "vK." + ID)
+    new GraphFrame(vK, eK)
+  }
+  */
+
 
   // ============================ DataFrame utilities ========================================
 
@@ -563,21 +787,6 @@ object GraphFrame extends Serializable {
   }
   */
 
-  /** Helper for using [col].* in Spark 1.4.  Returns sequence of [col].[field] for all fields */
-  private[graphframes] def colStar(df: DataFrame, col: String): Seq[String] = {
-    df.schema(col).dataType match {
-      case s: StructType =>
-        s.fieldNames.map(f => col + "." + f)
-      case other =>
-        throw new RuntimeException(s"Unknown error in GraphFrame. Expected column $col to be" +
-          s" StructType, but found type: $other")
-    }
-  }
-
-  /** Nest all columns within a single StructType column with the given name */
-  private[graphframes] def nestAsCol(df: DataFrame, name: String): Column = {
-    struct(df.columns.map(c => df(c)) :_*).as(name)
-  }
 }
 
 /**
